@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+weights/
+outputs/
+runs/
+wandb/
+*.safetensors
+*.pt
+*.pth

@@ -1,0 +1,112 @@
+# MAS-BIT: one model trained jointly on participants T12 and T15.
+
+seed: 42
+
+paths:
+  data_dir: YOUR_DATA_DIR                      # contains willett_2023_text/ and brandman_2024_text/
+  text_decoder_dir: weights/Qwen3-ASR-1.7B     # local copy of Qwen/Qwen3-ASR-1.7B
+  init_checkpoint: weights/init.safetensors    # written by prepare_init.py from the released BIT checkpoints
+  output_dir: outputs/mas_bit                  # checkpoints and logs of train.py
+
+encoder:                                       # BIT neural encoder (one per released checkpoint)
+  patch_size: 5                                # 20 ms time bins per encoder token
+  max_frames: 2500                             # longest input, in time bins
+  smooth_sd: 2
+  hidden_size: 384
+  n_layers: 7
+  n_heads: 6
+  inter_size: 512
+  rope_theta: 10000.0
+  input_dropout: 0.2
+  dropout: 0.4
+
+model:
+  lora_rank: 8
+  lora_alpha: 32
+  lora_dropout: 0.2
+  fusion_hidden_size: 1024
+  message_top_k: 16                            # token alternatives kept per latent-message position
+  message_dropout: 0.15                        # probability of dropping a whole expert message
+  message_token_dropout: 0.1
+  intermediate_ctc_layers: [3, 5]
+  max_new_tokens: {t12: 24, t15: 29}
+  prompts:                                     # '#' marks the slot of the continuous input
+    neural: "<|neural_activity|>#<|/neural_activity|> decode the above neural activity into an English sentence:"
+    phonetic: "<|phoneme_probability_features|>#<|/phoneme_probability_features|> decode the above phoneme probability features into an English sentence:"
+    arbiter: "<|neural_and_expert_messages|>#<|/neural_and_expert_messages|> decode the above neural activity and both agents' transcript estimates into an English sentence:"
+
+augmentation:
+  apply_prob: 1.0
+  warp_points: 2
+  warp_sd: 0.05
+  warp_clip: [0.9, 1.1]
+  electrode_dropout: 0.05
+  time_mask_frac: 0.1
+  time_mask_span: [10, 20]
+  noise_sd: 0.2
+  span_mask_frac: 0.2                          # longest masked span of encoder patches, as a fraction of the trial
+
+training:
+  batch_size: 2                                # trials per GPU and forward pass
+  grad_accum: 2                                # forward passes per update: 8 GPUs x 2 x 2 = 32 trials per update
+  bucket_window: 4                             # trials are length-sorted within windows of bucket_window x batch_size
+  grad_clip: 1.0
+  ctc_weight: 0.3
+  intermediate_ctc_weight: 0.05                # ramped in over the first epoch that trains the encoders
+  # Staged-to-joint schedule.  Every stage warms up and decays its own learning rates; `train` lists the parameter
+  # groups it updates, all others are frozen.
+  stages:
+    - name: align
+      epochs: 5
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross]
+      lr: {input_projection_cross: 1.0e-4}     # the new input projections start at the interface rate
+    - name: encoder
+      epochs: 5
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross,
+              input_projection_native, encoder]
+    - name: neural
+      epochs: 5
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross,
+              input_projection_native, encoder, adapter_neural]
+    - name: phonetic
+      epochs: 5
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross,
+              input_projection_native, encoder, phoneme_heads, adapter_phonetic]
+    - name: arbiter
+      epochs: 5
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross,
+              input_projection_native, encoder, adapter_arbiter]
+    - name: joint
+      epochs: 40
+      lr_scale: 0.125                          # scales every learning rate of this stage
+      muon_warmup: 0.05                        # warm-up fraction of the Muon learning rate in this stage
+      train: [neural_projector, phoneme_embeddings, role_embeddings, input_projection_cross,
+              input_projection_native, encoder, phoneme_heads, adapter_neural, adapter_phonetic, adapter_arbiter]
+  selection:                                   # fewest arbiter word errors on the pooled validation sets
+    start_epoch: 25
+    patience: 15
+
+optimizer:
+  warmup: 0.05                                 # fraction of a stage's updates
+  floor: 0.1                                   # fraction of the peak at which a stage starts and ends
+  lr:                                          # peak learning rate of each parameter group (AdamW)
+    encoder: 2.0e-5
+    input_projection_native: 2.0e-5
+    input_projection_cross: 2.0e-5
+    phoneme_heads: 2.0e-5
+    neural_projector: 1.0e-4
+    phoneme_embeddings: 1.0e-4
+    role_embeddings: 1.0e-4
+    adapter_neural: 1.0e-4
+    adapter_phonetic: 1.0e-4
+    adapter_arbiter: 1.0e-4
+  adamw:
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 1.0e-5                       # weight matrices and embeddings; biases and norms are not decayed
+  muon:                                        # weight matrices of the encoder blocks
+    lr: 4.0e-5
+    warmup: 0.1
+    weight_decay: 0.01
+    momentum: 0.95
+    ns_steps: 5
