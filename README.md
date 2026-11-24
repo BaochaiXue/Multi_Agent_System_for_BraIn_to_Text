@@ -1,5 +1,7 @@
 ## MAS-BIT: A Multi-Agent System for End-to-End BraIn-to-Text Decoding
 
+**Paper:** [arXiv:2611.29457](https://arxiv.org/pdf/2611.29457)
+
 **MAS-BIT** decodes sentences from intracortical neural activity with three language agents that share one frozen audio-LLM
 text decoder. A *neural expert* reads continuous encoder representations, a *phonetic expert* reads phoneme posteriors,
 and an *arbiter* combines their latent messages with direct neural evidence to produce the sentence. One model is trained
